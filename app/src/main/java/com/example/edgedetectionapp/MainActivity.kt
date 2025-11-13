@@ -1,34 +1,82 @@
-package com.example.edgedetectionapp
+package com.example.edgedetectionapp // Make sure this matches your package name
 
-import androidx.appcompat.app.AppCompatActivity
+import android.Manifest
+import android.content.pm.PackageManager
+import android.opengl.GLSurfaceView
 import android.os.Bundle
-import android.widget.TextView
-import com.example.edgedetectionapp.databinding.ActivityMainBinding
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var binding: ActivityMainBinding
+    private lateinit var glSurfaceView: GLSurfaceView
+    private lateinit var cameraRenderer: CameraGLRenderer
+    private val CAMERA_PERMISSION_CODE = 101
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
 
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
+        glSurfaceView = findViewById(R.id.gl_surface_view)
 
-        // Example of a call to a native method
-        binding.sampleText.text = stringFromJNI()
+        // Check for camera permission
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            == PackageManager.PERMISSION_DENIED) {
+            // Request permission
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_CODE)
+        } else {
+            // Permission already granted
+            setupGLSurfaceView()
+        }
     }
 
-    /**
-     * A native method that is implemented by the 'edgedetectionapp' native library,
-     * which is packaged with this application.
-     */
-    external fun stringFromJNI(): String
+    private fun setupGLSurfaceView() {
+        glSurfaceView.setEGLContextClientVersion(2)
+        cameraRenderer = CameraGLRenderer(this, glSurfaceView)
+        glSurfaceView.setRenderer(cameraRenderer)
+        glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
+    }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == CAMERA_PERMISSION_CODE) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                // Permission granted
+                setupGLSurfaceView()
+            } else {
+                // Permission denied
+                Toast.makeText(this, "Camera Permission Denied", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::glSurfaceView.isInitialized) {
+            glSurfaceView.onResume()
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        if (::glSurfaceView.isInitialized) {
+            glSurfaceView.onPause()
+            if(::cameraRenderer.isInitialized) {
+                cameraRenderer.onPause()
+            }
+        }
+    }
+
+    // We still need to load our native library
     companion object {
-        // Used to load the 'edgedetectionapp' library on application startup.
         init {
-            System.loadLibrary("edgedetectionapp")
+            System.loadLibrary("native-lib")
         }
     }
 }
