@@ -75,6 +75,9 @@ class MainActivity : AppCompatActivity() {
 
     // We still need to load our native library
     companion object {
+        @JvmStatic
+        external fun processFrame(width: Int, height: Int, yuvData: ByteArray): ByteArray
+
         init {
             System.loadLibrary("native-lib")
         }

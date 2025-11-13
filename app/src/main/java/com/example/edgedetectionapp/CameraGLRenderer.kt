@@ -1,9 +1,8 @@
 package com.example.edgedetectionapp // Make sure this matches your package name
 
-import android.content.Context
 import android.graphics.SurfaceTexture
+import android.content.Context
 import android.hardware.Camera
-import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import java.nio.ByteBuffer
@@ -13,18 +12,24 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 class CameraGLRenderer(private val context: Context, private val surfaceView: GLSurfaceView) :
-    GLSurfaceView.Renderer, SurfaceTexture.OnFrameAvailableListener {
+    GLSurfaceView.Renderer, Camera.PreviewCallback {
 
-    private lateinit var surfaceTexture: SurfaceTexture
-    private var textureId: Int = 0
     private var camera: Camera? = null
+    private var cameraWidth: Int = 0
+    private var cameraHeight: Int = 0
 
-    private val vPositionHandle: Int = 0
-    private val vTexCoordHandle: Int = 0
+    private var textureId: Int = 0
     private var shaderProgram: Int = 0
 
+    // Buffers for drawing the full-screen quad
     private val vertexBuffer: FloatBuffer
     private val texCoordBuffer: FloatBuffer
+
+    // A buffer to hold the processed frame bytes from C++
+    private var processedFrame: ByteArray? = null
+    private var frameDataBuffer: ByteBuffer? = null
+    private var isFrameReady = false
+    private val frameSync = Any()
 
     private val vertices = floatArrayOf(
         -1.0f, -1.0f,
@@ -33,6 +38,7 @@ class CameraGLRenderer(private val context: Context, private val surfaceView: GL
         1.0f,  1.0f
     )
 
+    // Texture coordinates are flipped vertically (Y=0 is top in OpenGL)
     private val texCoords = floatArrayOf(
         0.0f, 1.0f,
         1.0f, 1.0f,
@@ -40,7 +46,8 @@ class CameraGLRenderer(private val context: Context, private val surfaceView: GL
         1.0f, 0.0f
     )
 
-    // Simple shaders to draw the texture
+    // NEW Shaders: These now use a standard 'sampler2D'
+    // instead of the 'samplerExternalOES'
     private val vertexShaderCode = """
         attribute vec4 vPosition;
         attribute vec2 vTexCoord;
@@ -52,10 +59,9 @@ class CameraGLRenderer(private val context: Context, private val surfaceView: GL
     """.trimIndent()
 
     private val fragmentShaderCode = """
-        #extension GL_OES_EGL_image_external : require
         precision mediump float;
         varying vec2 fTexCoord;
-        uniform samplerExternalOES sTexture;
+        uniform sampler2D sTexture;
         void main() {
             gl_FragColor = texture2D(sTexture, fTexCoord);
         }
@@ -79,20 +85,15 @@ class CameraGLRenderer(private val context: Context, private val surfaceView: GL
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        // Create texture
+        // Create standard 2D texture
         val textures = IntArray(1)
         GLES20.glGenTextures(1, textures, 0)
         textureId = textures[0]
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-
-        // Create SurfaceTexture
-        surfaceTexture = SurfaceTexture(textureId)
-        surfaceTexture.setOnFrameAvailableListener(this)
-
-        // Start camera
-        startCamera()
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
 
         // Create shader program
         val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, vertexShaderCode)
@@ -102,6 +103,9 @@ class CameraGLRenderer(private val context: Context, private val surfaceView: GL
             GLES20.glAttachShader(it, fragmentShader)
             GLES20.glLinkProgram(it)
         }
+
+        // Start camera
+        startCamera()
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -109,40 +113,101 @@ class CameraGLRenderer(private val context: Context, private val surfaceView: GL
     }
 
     override fun onDrawFrame(gl: GL10?) {
-        // Update texture
-        surfaceTexture.updateTexImage()
-
-        // Draw
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-        GLES20.glUseProgram(shaderProgram)
 
-        val vPositionHandle = GLES20.glGetAttribLocation(shaderProgram, "vPosition")
-        GLES20.glEnableVertexAttribArray(vPositionHandle)
-        GLES20.glVertexAttribPointer(vPositionHandle, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
+        synchronized(frameSync) {
+            if (isFrameReady && processedFrame != null) {
+                // Lazily allocate buffer
+                if (frameDataBuffer == null || frameDataBuffer!!.capacity() != processedFrame!!.size) {
+                    frameDataBuffer = ByteBuffer.allocateDirect(processedFrame!!.size)
+                }
 
-        val vTexCoordHandle = GLES20.glGetAttribLocation(shaderProgram, "vTexCoord")
-        GLES20.glEnableVertexAttribArray(vTexCoordHandle)
-        GLES20.glVertexAttribPointer(vTexCoordHandle, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer)
+                // Copy processed data to buffer and upload to texture
+                frameDataBuffer!!.clear()
+                frameDataBuffer!!.put(processedFrame!!)
+                frameDataBuffer!!.position(0)
 
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+                GLES20.glTexImage2D(
+                    GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+                    cameraWidth, cameraHeight, 0,
+                    GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, frameDataBuffer
+                )
+                isFrameReady = false
+            }
+        }
 
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        // Draw the texture
+        if (processedFrame != null) {
+            GLES20.glUseProgram(shaderProgram)
 
-        GLES20.glDisableVertexAttribArray(vPositionHandle)
-        GLES20.glDisableVertexAttribArray(vTexCoordHandle)
+            val vPositionHandle = GLES20.glGetAttribLocation(shaderProgram, "vPosition")
+            GLES20.glEnableVertexAttribArray(vPositionHandle)
+            GLES20.glVertexAttribPointer(vPositionHandle, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
+
+            val vTexCoordHandle = GLES20.glGetAttribLocation(shaderProgram, "vTexCoord")
+            GLES20.glEnableVertexAttribArray(vTexCoordHandle)
+            GLES20.glVertexAttribPointer(vTexCoordHandle, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer)
+
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+            GLES20.glDisableVertexAttribArray(vPositionHandle)
+            GLES20.glDisableVertexAttribArray(vTexCoordHandle)
+        }
     }
 
-    override fun onFrameAvailable(surfaceTexture: SurfaceTexture?) {
-        // Request a render
+    // This is called for every camera frame
+    override fun onPreviewFrame(data: ByteArray, camera: Camera) {
+        // Process the frame in C++
+        // Note: This is a blocking call on the UI thread.
+        // For a real app, this should be on a background thread.
+        // For this assignment, this is fine.
+        val processed = MainActivity.processFrame(cameraWidth, cameraHeight, data)
+
+        // Store the result
+        synchronized(frameSync) {
+            processedFrame = processed
+            isFrameReady = true
+        }
+
+        // Request a render to draw the new frame
         surfaceView.requestRender()
+
+        // Re-queue the buffer
+        camera.addCallbackBuffer(data)
     }
 
     private fun startCamera() {
         try {
             camera = Camera.open(0) // Open back camera
-            camera?.setPreviewTexture(surfaceTexture)
-            camera?.startPreview()
+            val params = camera!!.parameters
+
+            // Find a good preview size
+            val previewSize = params.supportedPreviewSizes[0]
+            params.setPreviewSize(previewSize.width, previewSize.height)
+            cameraWidth = previewSize.width
+            cameraHeight = previewSize.height
+
+            // Set YUV format
+            params.previewFormat = android.graphics.ImageFormat.NV21
+            camera!!.parameters = params
+
+            // Set up buffer for onPreviewFrame
+            val previewFormat = params.previewFormat
+            val bitsPerPixel = android.graphics.ImageFormat.getBitsPerPixel(previewFormat)
+            val bufferSize = (cameraWidth * cameraHeight * bitsPerPixel) / 8
+            camera!!.addCallbackBuffer(ByteArray(bufferSize))
+            camera!!.addCallbackBuffer(ByteArray(bufferSize))
+            camera!!.setPreviewCallbackWithBuffer(this)
+
+            // We must set a dummy texture, even though we don't use it
+            // This is a quirk of the Camera1 API
+            val dummyTexture = SurfaceTexture(10)
+            camera!!.setPreviewTexture(dummyTexture)
+            camera!!.startPreview()
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -150,6 +215,7 @@ class CameraGLRenderer(private val context: Context, private val surfaceView: GL
 
     fun onPause() {
         camera?.stopPreview()
+        camera?.setPreviewCallbackWithBuffer(null)
         camera?.release()
         camera = null
     }
