@@ -1,10 +1,22 @@
 #include <jni.h>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+#include <android/log.h>
+
+// 0 = Raw, 1 = Canny
+static int processingMode = 1;
 
 // Store a persistent reference to the output byte array
 static jbyteArray processedData = nullptr;
 static cv::Mat processedMat;
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_edgedetectionapp_MainActivity_setProcessingMode(
+        JNIEnv *env,
+        jclass clazz,
+        jint mode) {
+    processingMode = mode;
+}
 
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_com_example_edgedetectionapp_MainActivity_processFrame(
@@ -18,21 +30,29 @@ Java_com_example_edgedetectionapp_MainActivity_processFrame(
     cv::Mat yuvMat(height + height / 2, width, CV_8UC1, (unsigned char *) yuv);
     cv::Mat grayMat;
 
-    // 2. Convert YUV to Grayscale
-    // The Canny algorithm needs a grayscale image
-    cv::cvtColor(yuvMat, grayMat, cv::COLOR_YUV2GRAY_NV21);
-
-    // 3. Apply Canny Edge Detection
-    cv::Mat edgesMat;
-    cv::Canny(grayMat, edgesMat, 100, 200);
-
-    // 4. Convert Grayscale Edges to RGBA
-    // OpenGL needs an RGBA texture, so we convert the 1-channel
-    // Canny output to a 4-channel RGBA image.
+    // Lazily allocate the RGBA mat
     if (processedMat.rows != height || processedMat.cols != width) {
         processedMat = cv::Mat(height, width, CV_8UC4);
     }
-    cv::cvtColor(edgesMat, processedMat, cv::COLOR_GRAY2RGBA);
+
+    if (processingMode == 1) {
+        // --- CANNY EDGE MODE ---
+        // 2. Convert YUV to Grayscale
+        cv::cvtColor(yuvMat, grayMat, cv::COLOR_YUV2GRAY_NV21);
+
+        // 3. Apply Canny Edge Detection
+        cv::Mat edgesMat;
+        cv::Canny(grayMat, edgesMat, 100, 200);
+
+        // 4. Convert Grayscale Edges to RGBA
+        cv::cvtColor(edgesMat, processedMat, cv::COLOR_GRAY2RGBA);
+
+    } else {
+        // --- RAW MODE ---
+        // 2. Convert YUV directly to RGBA
+        cv::cvtColor(yuvMat, processedMat, cv::COLOR_YUV2RGBA_NV21);
+    }
+
 
     // 5. Convert processed Mat back to a jbyteArray
     int totalBytes = processedMat.total() * processedMat.elemSize();

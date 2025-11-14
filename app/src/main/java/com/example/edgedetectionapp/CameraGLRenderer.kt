@@ -10,7 +10,11 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
+private val frameSync = Any()
 
+// --- Bonus: FPS Logging ---
+private var lastTime: Long = System.currentTimeMillis()
+private var frameCount: Int = 0
 class CameraGLRenderer(private val context: Context, private val surfaceView: GLSurfaceView) :
     GLSurfaceView.Renderer, Camera.PreviewCallback {
 
@@ -178,6 +182,17 @@ class CameraGLRenderer(private val context: Context, private val surfaceView: GL
 
         // Re-queue the buffer
         camera.addCallbackBuffer(data)
+
+        camera.addCallbackBuffer(data)
+
+        // --- Bonus: Log FPS ---
+        frameCount++
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastTime >= 1000) { // Log every 1 second
+            android.util.Log.d("EdgeDetectionApp", "FPS: $frameCount")
+            frameCount = 0
+            lastTime = currentTime
+        }
     }
 
     private fun startCamera() {

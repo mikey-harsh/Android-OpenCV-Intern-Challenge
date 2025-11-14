@@ -20,6 +20,19 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         glSurfaceView = findViewById(R.id.gl_surface_view)
+        // --- Bonus: Toggle Button ---
+        val toggleButton: android.widget.Button = findViewById(R.id.toggle_button)
+        var isEdgeMode = true
+        toggleButton.setOnClickListener {
+            isEdgeMode = !isEdgeMode
+            if (isEdgeMode) {
+                setProcessingMode(1) // 1 = Canny
+                toggleButton.text = "Show Raw"
+            } else {
+                setProcessingMode(0) // 0 = Raw
+                toggleButton.text = "Show Edges"
+            }
+        }
 
         // Check for camera permission
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
@@ -77,6 +90,9 @@ class MainActivity : AppCompatActivity() {
     companion object {
         @JvmStatic
         external fun processFrame(width: Int, height: Int, yuvData: ByteArray): ByteArray
+
+        @JvmStatic
+        external fun setProcessingMode(mode: Int)
 
         init {
             System.loadLibrary("native-lib")
