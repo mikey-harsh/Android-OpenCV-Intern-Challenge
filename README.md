@@ -42,7 +42,7 @@ I also implemented the following optional features:
     &nbsp;&nbsp;&nbsp;
     <img src="./screenshots/app2.jpg" width="300" alt="App - Raw Feed">
     <br/><br/>
-    <em>(Add your third screenshot description here, or just add the image)</em>
+    <em></em>
     <br/>
     <img src="./screenshots/app3.jpg" width="300" alt="App - Bonus Feature">
 </div>
